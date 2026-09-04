@@ -22,7 +22,7 @@ jobs:
         run: |
           $zip = '.\X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip'
           if (-not (Test-Path $zip)) { throw 'Build bundle not found.' }
-          $expected = '6639014df24ee58e053e58b7de235bdd228e60a0e8594269c8d6d544b8c9fa11'
+          $expected = '235a460cd2262c5b60975b41d833ed35430841b4750c9ad67e007590c098345e'
           $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
           Write-Host "Bundle SHA-256: $actual"
           if ($actual -ne $expected) { throw "Bundle SHA mismatch. Expected $expected got $actual" }
