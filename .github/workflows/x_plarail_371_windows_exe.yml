@@ -2,7 +2,8 @@ name: Build X_Plarail 3.7.1 MENU_FIX Windows EXE
 
 on:
   push:
-    branches: [ main ]
+    paths:
+      - TRIGGER_BUILD
   workflow_dispatch:
 
 jobs:
@@ -10,12 +11,20 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-      - name: Extract certified build bundle
+      - name: Reconstruct and verify certified build bundle
         shell: pwsh
         run: |
+          $parts = Get-ChildItem .\bundle_chunks\chunk_*.txt | Sort-Object Name
+          if ($parts.Count -ne 10) { throw "Expected 10 chunks, found $($parts.Count)." }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          $zip = '.\X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip'
+          [IO.File]::WriteAllBytes($zip, [Convert]::FromBase64String($b64))
+          $expected = '6639014df24ee58e053e58b7de235bdd228e60a0e8594269c8d6d544b8c9fa11'
+          $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          Write-Host "Bundle SHA-256: $actual"
+          if ($actual -ne $expected) { throw "Bundle SHA mismatch. Expected $expected got $actual" }
           New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
-          tar.exe -xf .\X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip -C .\buildsrc
-          if ($LASTEXITCODE -ne 0) { throw 'Bundle extraction failed.' }
+          Expand-Archive -Path $zip -DestinationPath .\buildsrc -Force
       - name: Build native Windows executable
         shell: pwsh
         working-directory: buildsrc
