@@ -27,7 +27,9 @@ jobs:
           Write-Host "Bundle SHA-256: $actual"
           if ($actual -ne $expected) { throw "Bundle SHA mismatch. Expected $expected got $actual" }
           New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
-          Expand-Archive -Path $zip -DestinationPath .\buildsrc -Force
+          & tar.exe -xf $zip -C .\buildsrc
+          if ($LASTEXITCODE -ne 0) { throw "bsdtar extraction failed: $LASTEXITCODE" }
+          if (-not (Test-Path '.\buildsrc\app.py')) { throw 'Extracted bundle does not contain app.py.' }
 
       - name: Verify expanded-sidebar MENU_FIX source
         shell: pwsh
