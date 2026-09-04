@@ -17,7 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify and extract MENU_FIX build bundle
+      - name: Setup Python 3.13 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: 'x64'
+
+      - name: Verify bundle, extract clean entries, repair certified services.py
         shell: pwsh
         run: |
           $zip = '.\X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip'
@@ -26,9 +32,37 @@ jobs:
           $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
           Write-Host "Bundle SHA-256: $actual"
           if ($actual -ne $expected) { throw "Bundle SHA mismatch. Expected $expected got $actual" }
-          New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
-          & tar.exe -xf $zip -C .\buildsrc
-          if ($LASTEXITCODE -ne 0) { throw "bsdtar extraction failed: $LASTEXITCODE" }
+          $code = @'
+          import base64, hashlib, lzma, pathlib, zipfile
+          src = pathlib.Path('X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip')
+          dst = pathlib.Path('buildsrc')
+          dst.mkdir(exist_ok=True)
+          skip = 'xplarail/services.py'
+          failures = []
+          with zipfile.ZipFile(src) as z:
+              for info in z.infolist():
+                  name = info.filename.replace('\\', '/')
+                  if name.rstrip('/') == skip:
+                      continue
+                  try:
+                      z.extract(info, dst)
+                  except Exception as exc:
+                      failures.append((name, repr(exc)))
+          if failures:
+              raise SystemExit('Unexpected corrupt ZIP entries: ' + repr(failures))
+          patch_b64 = pathlib.Path('build_patches/services.py.xz.b64').read_text(encoding='utf-8').strip()
+          services = lzma.decompress(base64.b64decode(patch_b64))
+          expected_services = '3baafdd09c829056546f36fb619a487322376a84c39ed8fc01f14268dc374545'
+          actual_services = hashlib.sha256(services).hexdigest()
+          if actual_services != expected_services:
+              raise SystemExit(f'services.py repair SHA mismatch: {actual_services}')
+          target = dst / 'xplarail' / 'services.py'
+          target.parent.mkdir(parents=True, exist_ok=True)
+          target.write_bytes(services)
+          print('ZIP clean entries + certified services.py repair: PASS')
+          '@
+          $code | python -
+          if ($LASTEXITCODE -ne 0) { throw "Certified extraction/repair failed: $LASTEXITCODE" }
           if (-not (Test-Path '.\buildsrc\app.py')) { throw 'Extracted bundle does not contain app.py.' }
 
       - name: Verify expanded-sidebar MENU_FIX source
@@ -40,12 +74,6 @@ jobs:
             if (-not $ui.Contains($needle)) { throw "MENU_FIX marker missing: $needle" }
           }
           Write-Host 'Expanded sidebar scroll MENU_FIX markers: PASS'
-
-      - name: Setup Python 3.13 x64
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-          architecture: 'x64'
 
       - name: Install build requirements
         shell: pwsh
