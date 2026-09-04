@@ -4,50 +4,103 @@ on:
   push:
     paths:
       - TRIGGER_BUILD
+      - .github/workflows/x_plarail_371_windows_exe.yml
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: windows-2022
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Reconstruct and verify certified build bundle
+
+      - name: Verify and extract MENU_FIX build bundle
         shell: pwsh
         run: |
-          $parts = Get-ChildItem .\bundle_chunks\chunk_*.txt | Sort-Object Name
-          if ($parts.Count -ne 10) { throw "Expected 10 chunks, found $($parts.Count)." }
-          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
           $zip = '.\X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip'
-          [IO.File]::WriteAllBytes($zip, [Convert]::FromBase64String($b64))
+          if (-not (Test-Path $zip)) { throw 'Build bundle not found.' }
           $expected = '6639014df24ee58e053e58b7de235bdd228e60a0e8594269c8d6d544b8c9fa11'
           $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
           Write-Host "Bundle SHA-256: $actual"
           if ($actual -ne $expected) { throw "Bundle SHA mismatch. Expected $expected got $actual" }
           New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
           Expand-Archive -Path $zip -DestinationPath .\buildsrc -Force
+
+      - name: Verify expanded-sidebar MENU_FIX source
+        shell: pwsh
+        working-directory: buildsrc
+        run: |
+          $ui = Get-Content .\xplarail\ui.py -Raw -Encoding UTF8
+          foreach ($needle in @('nav_scrollbar', '_sidebar_mousewheel', '_refresh_sidebar_scrollbar')) {
+            if (-not $ui.Contains($needle)) { throw "MENU_FIX marker missing: $needle" }
+          }
+          Write-Host 'Expanded sidebar scroll MENU_FIX markers: PASS'
+
+      - name: Setup Python 3.13 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: 'x64'
+
+      - name: Install build requirements
+        shell: pwsh
+        working-directory: buildsrc
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements-build.txt
+
+      - name: Source self-test
+        shell: pwsh
+        working-directory: buildsrc
+        run: |
+          python app.py --self-test --report-file .\source-self-test.json
+          if ($LASTEXITCODE -ne 0) { throw 'Source self-test failed.' }
+          $r = Get-Content .\source-self-test.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($r.status -ne 'PASS' -or $r.version -ne '3.7.1' -or $r.schema_version -ne 360) {
+            throw 'Source self-test is not 3.7.1/schema 360 PASS.'
+          }
+
       - name: Build native Windows executable
         shell: pwsh
         working-directory: buildsrc
         run: |
           powershell -ExecutionPolicy Bypass -File .\BUILD_EXE_WINDOWS.ps1 -CleanEnvironment
+
       - name: Frozen EXE self-test
         shell: pwsh
         working-directory: buildsrc
         run: |
           $exe = '.\dist\X_Plarail_Collection_OS\X_Plarail_Collection_OS.exe'
+          if (-not (Test-Path $exe)) { throw 'Frozen EXE not produced.' }
           & $exe --self-test --report-file .\exe-self-test.json
           if ($LASTEXITCODE -ne 0) { throw 'Frozen EXE self-test failed.' }
-          $r = Get-Content .\exe-self-test.json -Raw | ConvertFrom-Json
-          if ($r.status -ne 'PASS') { throw 'Frozen EXE report is not PASS.' }
-      - name: Runtime info and hash
+          $r = Get-Content .\exe-self-test.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($r.status -ne 'PASS' -or $r.version -ne '3.7.1' -or $r.schema_version -ne 360) {
+            throw 'Frozen EXE report is not 3.7.1/schema 360 PASS.'
+          }
+
+      - name: Frozen runtime identity and portable package
         shell: pwsh
         working-directory: buildsrc
         run: |
-          $exe = '.\dist\X_Plarail_Collection_OS\X_Plarail_Collection_OS.exe'
+          $dir = '.\dist\X_Plarail_Collection_OS'
+          $exe = Join-Path $dir 'X_Plarail_Collection_OS.exe'
           & $exe --runtime-info --report-file .\runtime-info.json
           if ($LASTEXITCODE -ne 0) { throw 'Runtime info failed.' }
-          (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant() | Set-Content .\EXE_SHA256.txt
-          Compress-Archive -Path .\dist\X_Plarail_Collection_OS\* -DestinationPath .\X_Plarail_Collection_OS_3_7_1_MENU_FIX_WINDOWS_PORTABLE.zip -Force
+          $r = Get-Content .\runtime-info.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          if (-not $r.frozen -or $r.version -ne '3.7.1' -or $r.schema_version -ne 360) {
+            throw 'Frozen runtime identity check failed.'
+          }
+          $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
+          $hash | Set-Content .\EXE_SHA256.txt -Encoding ascii
+          Copy-Item .\exe-self-test.json (Join-Path $dir 'FROZEN_SELF_TEST_3_7_1.json')
+          Copy-Item .\runtime-info.json (Join-Path $dir 'RUNTIME_INFO_3_7_1.json')
+          Copy-Item .\EXE_SHA256.txt (Join-Path $dir 'SHA256_EXE_3_7_1.txt')
+          Compress-Archive -Path "$dir\*" -DestinationPath .\X_Plarail_Collection_OS_3_7_1_MENU_FIX_WINDOWS_PORTABLE.zip -Force
+          Write-Host "EXE SHA-256: $hash"
+
       - name: Upload Windows portable build
         uses: actions/upload-artifact@v4
         with:
@@ -59,4 +112,4 @@ jobs:
             buildsrc/exe-self-test.json
             buildsrc/runtime-info.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
