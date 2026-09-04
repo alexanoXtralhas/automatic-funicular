@@ -14,7 +14,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
-          Expand-Archive -Path .\X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip -DestinationPath .\buildsrc -Force
+          tar.exe -xf .\X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip -C .\buildsrc
+          if ($LASTEXITCODE -ne 0) { throw 'Bundle extraction failed.' }
       - name: Build native Windows executable
         shell: pwsh
         working-directory: buildsrc
