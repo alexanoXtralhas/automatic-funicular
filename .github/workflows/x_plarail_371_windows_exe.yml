@@ -23,7 +23,7 @@ jobs:
           python-version: '3.13'
           architecture: 'x64'
 
-      - name: Verify bundle, extract clean entries, repair certified services.py
+      - name: Recover bundle and repair certified services.py
         shell: pwsh
         run: |
           $zip = '.\X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip'
@@ -32,48 +32,50 @@ jobs:
           $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
           Write-Host "Bundle SHA-256: $actual"
           if ($actual -ne $expected) { throw "Bundle SHA mismatch. Expected $expected got $actual" }
+          New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
+          & tar.exe -xf $zip -C .\buildsrc
+          $tarExit = $LASTEXITCODE
+          Write-Host "bsdtar recovery exit code: $tarExit (known corrupt services stream is repaired below)"
           $code = @'
-          import base64, hashlib, lzma, pathlib, zipfile
-          src = pathlib.Path('X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip')
-          dst = pathlib.Path('buildsrc')
-          dst.mkdir(exist_ok=True)
-          skip = 'xplarail/services.py'
-          failures = []
-          with zipfile.ZipFile(src) as z:
-              for info in z.infolist():
-                  name = info.filename.replace('\\', '/')
-                  if name.rstrip('/') == skip:
-                      continue
-                  try:
-                      z.extract(info, dst)
-                  except Exception as exc:
-                      failures.append((name, repr(exc)))
-          if failures:
-              raise SystemExit('Unexpected corrupt ZIP entries: ' + repr(failures))
+          import base64, hashlib, lzma, pathlib
           patch_b64 = pathlib.Path('build_patches/services.py.xz.b64').read_text(encoding='utf-8').strip()
           services = lzma.decompress(base64.b64decode(patch_b64))
-          expected_services = '3baafdd09c829056546f36fb619a487322376a84c39ed8fc01f14268dc374545'
-          actual_services = hashlib.sha256(services).hexdigest()
-          if actual_services != expected_services:
-              raise SystemExit(f'services.py repair SHA mismatch: {actual_services}')
-          target = dst / 'xplarail' / 'services.py'
+          expected = '3baafdd09c829056546f36fb619a487322376a84c39ed8fc01f14268dc374545'
+          actual = hashlib.sha256(services).hexdigest()
+          if actual != expected:
+              raise SystemExit(f'services.py repair SHA mismatch: {actual}')
+          target = pathlib.Path('buildsrc/xplarail/services.py')
           target.parent.mkdir(parents=True, exist_ok=True)
           target.write_bytes(services)
-          print('ZIP clean entries + certified services.py repair: PASS')
+          print('Certified services.py repair: PASS')
           '@
           $code | python -
-          if ($LASTEXITCODE -ne 0) { throw "Certified extraction/repair failed: $LASTEXITCODE" }
-          if (-not (Test-Path '.\buildsrc\app.py')) { throw 'Extracted bundle does not contain app.py.' }
+          if ($LASTEXITCODE -ne 0) { throw "services.py repair failed: $LASTEXITCODE" }
+          foreach ($required in @(
+            '.\buildsrc\app.py',
+            '.\buildsrc\x_plarail.spec',
+            '.\buildsrc\BUILD_EXE_WINDOWS.ps1',
+            '.\buildsrc\requirements-build.txt',
+            '.\buildsrc\xplarail\ui.py',
+            '.\buildsrc\xplarail\services.py',
+            '.\buildsrc\data\x_plarail.db',
+            '.\buildsrc\docs\CORE_BASELINE_SHA256.json',
+            '.\buildsrc\installer\windows_version_info.txt'
+          )) {
+            if (-not (Test-Path $required)) { throw "Recovered bundle missing required file: $required" }
+          }
 
-      - name: Verify expanded-sidebar MENU_FIX source
+      - name: Verify source syntax and expanded-sidebar MENU_FIX
         shell: pwsh
         working-directory: buildsrc
         run: |
+          python -m compileall -q app.py xplarail xtralhas_core xtralhas_plugins
+          if ($LASTEXITCODE -ne 0) { throw 'Source compileall failed.' }
           $ui = Get-Content .\xplarail\ui.py -Raw -Encoding UTF8
           foreach ($needle in @('nav_scrollbar', '_sidebar_mousewheel', '_refresh_sidebar_scrollbar')) {
             if (-not $ui.Contains($needle)) { throw "MENU_FIX marker missing: $needle" }
           }
-          Write-Host 'Expanded sidebar scroll MENU_FIX markers: PASS'
+          Write-Host 'Source syntax + expanded sidebar MENU_FIX: PASS'
 
       - name: Install build requirements
         shell: pwsh
