@@ -28,18 +28,29 @@ jobs:
         run: |
           $zip = '.\X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip'
           if (-not (Test-Path $zip)) { throw 'Build bundle not found.' }
-          $expected = '235a460cd2262c5b60975b41d833ed35430841b4750c9ad67e007590c098345e'
-          $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
-          Write-Host "Bundle SHA-256: $actual"
-          if ($actual -ne $expected) { throw "Bundle SHA mismatch. Expected $expected got $actual" }
+          $expectedBundle = '235a460cd2262c5b60975b41d833ed35430841b4750c9ad67e007590c098345e'
+          $actualBundle = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          Write-Host "Bundle SHA-256: $actualBundle"
+          if ($actualBundle -ne $expectedBundle) { throw "Bundle SHA mismatch. Expected $expectedBundle got $actualBundle" }
+
           New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
           & tar.exe -xf $zip -C .\buildsrc
           $tarExit = $LASTEXITCODE
           Write-Host "bsdtar recovery exit code: $tarExit (known corrupt services stream is repaired below)"
+
+          $parts = Get-ChildItem '.\build_patches\services_parts\part_*.txt' | Sort-Object Name
+          if ($parts.Count -ne 4) { throw "Expected 4 services repair parts, found $($parts.Count)." }
+          $b64 = ($parts | ForEach-Object { (Get-Content -Raw -Encoding UTF8 $_.FullName).Trim() }) -join ''
+          [IO.File]::WriteAllBytes('.\services.py.xz', [Convert]::FromBase64String($b64))
+          $expectedXz = 'f1047f0f4b5d5cebf3757c50a0c265944a4fd1ac84ef8c5aae8248a106324156'
+          $actualXz = (Get-FileHash -Algorithm SHA256 '.\services.py.xz').Hash.ToLowerInvariant()
+          Write-Host "services.py.xz SHA-256: $actualXz"
+          if ($actualXz -ne $expectedXz) { throw "services.py.xz SHA mismatch. Expected $expectedXz got $actualXz" }
+
           $code = @'
-          import base64, hashlib, lzma, pathlib
-          patch_b64 = pathlib.Path('build_patches/services.py.xz.b64').read_text(encoding='utf-8').strip()
-          services = lzma.decompress(base64.b64decode(patch_b64))
+          import hashlib, lzma, pathlib
+          compressed = pathlib.Path('services.py.xz').read_bytes()
+          services = lzma.decompress(compressed)
           expected = '3baafdd09c829056546f36fb619a487322376a84c39ed8fc01f14268dc374545'
           actual = hashlib.sha256(services).hexdigest()
           if actual != expected:
@@ -51,6 +62,7 @@ jobs:
           '@
           $code | python -
           if ($LASTEXITCODE -ne 0) { throw "services.py repair failed: $LASTEXITCODE" }
+
           foreach ($required in @(
             '.\buildsrc\app.py',
             '.\buildsrc\x_plarail.spec',
