@@ -1,0 +1,52 @@
+name: Build X_Plarail 3.7.1 MENU_FIX Windows EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract certified build bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
+          Expand-Archive -Path .\X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip -DestinationPath .\buildsrc -Force
+      - name: Build native Windows executable
+        shell: pwsh
+        working-directory: buildsrc
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\BUILD_EXE_WINDOWS.ps1 -CleanEnvironment
+      - name: Frozen EXE self-test
+        shell: pwsh
+        working-directory: buildsrc
+        run: |
+          $exe = '.\dist\X_Plarail_Collection_OS\X_Plarail_Collection_OS.exe'
+          & $exe --self-test --report-file .\exe-self-test.json
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen EXE self-test failed.' }
+          $r = Get-Content .\exe-self-test.json -Raw | ConvertFrom-Json
+          if ($r.status -ne 'PASS') { throw 'Frozen EXE report is not PASS.' }
+      - name: Runtime info and hash
+        shell: pwsh
+        working-directory: buildsrc
+        run: |
+          $exe = '.\dist\X_Plarail_Collection_OS\X_Plarail_Collection_OS.exe'
+          & $exe --runtime-info --report-file .\runtime-info.json
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime info failed.' }
+          (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant() | Set-Content .\EXE_SHA256.txt
+          Compress-Archive -Path .\dist\X_Plarail_Collection_OS\* -DestinationPath .\X_Plarail_Collection_OS_3_7_1_MENU_FIX_WINDOWS_PORTABLE.zip -Force
+      - name: Upload Windows portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: X_Plarail_3_7_1_MENU_FIX_WINDOWS
+          path: |
+            buildsrc/dist/X_Plarail_Collection_OS/**
+            buildsrc/X_Plarail_Collection_OS_3_7_1_MENU_FIX_WINDOWS_PORTABLE.zip
+            buildsrc/EXE_SHA256.txt
+            buildsrc/exe-self-test.json
+            buildsrc/runtime-info.json
+          if-no-files-found: error
+          retention-days: 7
