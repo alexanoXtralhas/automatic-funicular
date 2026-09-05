@@ -29,14 +29,10 @@ jobs:
           import base64, hashlib, io, itertools, lzma, pathlib, tarfile
 
           root = pathlib.Path('build/minimal_tar_v2_parts')
-          files = [root / f'q{i:02d}.txt' for i in range(8)]
-          if not all(p.is_file() for p in files):
-              raise SystemExit('missing v2 payload chunks')
-          parts = [p.read_text(encoding='utf-8').strip() for p in files]
-          expected_lengths = [20000] * 8
-          missing = [e-len(p) for e,p in zip(expected_lengths, parts)]
+          parts = [(root / f'q{i:02d}.txt').read_text(encoding='utf-8').strip() for i in range(8)]
+          missing = [20000-len(p) for p in parts]
           print('chunk lengths=', [len(p) for p in parts], 'missing=', missing)
-          if missing != [1,1,1,0,0,0,1,3]:
+          if missing != [1,1,1,1,1,1,1,3]:
               raise SystemExit(f'unexpected v2 chunk-loss pattern: {missing}')
 
           alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
@@ -49,79 +45,57 @@ jobs:
                   if h == zero:
                       return True
                   try:
-                      raw = h[148:156].strip(b'\0 ') or b'0'
-                      stored = int(raw, 8)
-                      calc = sum(h[:148]) + (32 * 8) + sum(h[156:])
+                      stored = int(h[148:156].strip(b'\0 ') or b'0', 8)
+                      calc = sum(h[:148]) + 256 + sum(h[156:])
                       if stored != calc:
                           return False
                       sf = h[124:136]
-                      if sf and (sf[0] & 0x80):
-                          size = int.from_bytes(sf, 'big', signed=True)
-                      else:
-                          size = int(sf.strip(b'\0 ') or b'0', 8)
+                      size = int.from_bytes(sf, 'big', signed=True) if (sf and sf[0] & 0x80) else int(sf.strip(b'\0 ') or b'0', 8)
                       if size < 0:
                           return False
                   except Exception:
                       return False
-                  end = pos + 512 + ((size + 511) // 512) * 512
+                  end = pos + 512 + ((size + 511)//512)*512
                   if end > len(data):
                       return True
                   pos = end
               return True
 
-          def prefix_ok(corrected):
+          def prefix_ok(guesses):
+              corrected = [parts[i] + guesses[i] for i in range(len(guesses))]
               try:
                   raw = base64.b64decode(''.join(corrected), validate=True)
-                  dec = lzma.LZMADecompressor()
-                  out = dec.decompress(raw)
+                  out = lzma.LZMADecompressor().decompress(raw)
                   return tar_prefix_ok(out)
               except Exception:
                   return False
 
           candidates = [()]
-          for idx in (0,1,2):
+          for idx in range(7):
               nxt = []
               for prev in candidates:
                   for ch in alphabet:
-                      guesses = prev + (ch,)
-                      corrected = [parts[j] + guesses[j] for j in range(idx+1)]
-                      if prefix_ok(corrected):
-                          nxt.append(guesses)
+                      g = prev + (ch,)
+                      if prefix_ok(g):
+                          nxt.append(g)
               candidates = nxt
               print(f'after q{idx:02d}: candidates={len(candidates)}')
               if not candidates or len(candidates) > 8192:
                   raise SystemExit(f'candidate search not selective at q{idx:02d}: {len(candidates)}')
 
-          candidates = [g for g in candidates if prefix_ok([
-              parts[0]+g[0], parts[1]+g[1], parts[2]+g[2], parts[3], parts[4], parts[5]
-          ])]
-          print('after exact q03-q05: candidates=', len(candidates))
-          if not candidates or len(candidates) > 1024:
-              raise SystemExit(f'candidate search not selective after q05: {len(candidates)}')
-
-          with_q6 = []
-          for g in candidates:
-              for ch in alphabet:
-                  corrected = [parts[0]+g[0], parts[1]+g[1], parts[2]+g[2], parts[3], parts[4], parts[5], parts[6]+ch]
-                  if prefix_ok(corrected):
-                      with_q6.append(g + (ch,))
-          print('after q06: candidates=', len(with_q6))
-          if not with_q6 or len(with_q6) > 1024:
-              raise SystemExit(f'candidate search not selective at q06: {len(with_q6)}')
-
-          last_first = parts[7][-1]
+          # Final Base64 quartet: only tails whose decoded last two bytes are XZ footer magic YZ.
+          first = parts[7][-1]
           tails = []
           for abc in itertools.product(alphabet, repeat=3):
               tail = ''.join(abc)
               try:
-                  b = base64.b64decode(last_first + tail, validate=True)
+                  if base64.b64decode(first + tail, validate=True)[-2:] == b'YZ':
+                      tails.append(tail)
               except Exception:
-                  continue
-              if b[-2:] == b'YZ':
-                  tails.append(tail)
-          print('q07 suffix candidates from XZ magic=', len(tails))
+                  pass
+          print('q07 XZ-magic suffix candidates=', len(tails))
 
-          expected_hashes = {
+          expected = {
               'app.py':'1a779e34d7596df076ed11508b616eb5980ef8527ea9134d8daae36102aa6154',
               'x_plarail.spec':'63d8659bae7a30caded420d876b70e786d51660538f87f69188cc065bad2430f',
               'BUILD_EXE_WINDOWS.ps1':'d0b278eee27462c5f9c3188c64cc82b34b29079abfed8bc89f1f64d3dc2831b6',
@@ -133,39 +107,36 @@ jobs:
               'installer/windows_version_info.txt':'84170f8d623960f6124fdf1452429474652727c957cad31b83f3c7893dd5d2eb',
           }
 
-          solutions = []
-          for g in with_q6:
-              base_chunks = [parts[0]+g[0], parts[1]+g[1], parts[2]+g[2], parts[3], parts[4], parts[5], parts[6]+g[3]]
+          solutions=[]
+          for g in candidates:
+              corrected=''.join(parts[i]+g[i] for i in range(7))
               for tail in tails:
                   try:
-                      raw = base64.b64decode(''.join(base_chunks) + parts[7] + tail, validate=True)
-                      payload = lzma.decompress(raw)
+                      raw=base64.b64decode(corrected + parts[7] + tail, validate=True)
+                      payload=lzma.decompress(raw)
                       with tarfile.open(fileobj=io.BytesIO(payload), mode='r:') as tf:
-                          members = {m.name: m for m in tf.getmembers() if m.isfile()}
-                          ok = True
-                          for name, expected in expected_hashes.items():
-                              m = members.get(name)
-                              if m is None:
-                                  ok = False; break
-                              f = tf.extractfile(m)
-                              if f is None or hashlib.sha256(f.read()).hexdigest() != expected:
-                                  ok = False; break
+                          members={m.name:m for m in tf.getmembers() if m.isfile()}
+                          ok=True
+                          for name,h in expected.items():
+                              m=members.get(name)
+                              f=tf.extractfile(m) if m else None
+                              if f is None or hashlib.sha256(f.read()).hexdigest()!=h:
+                                  ok=False; break
                           if ok:
-                              solutions.append((g, tail, raw, payload))
+                              solutions.append((g,tail,raw,payload))
                   except Exception:
                       pass
-          print('fully verified solutions=', len(solutions))
-          if len(solutions) != 1:
-              raise SystemExit(f'expected exactly one hash-verified source solution, got {len(solutions)}')
+          print('fully hash-verified solutions=',len(solutions))
+          if len(solutions)!=1:
+              raise SystemExit(f'expected one verified payload, got {len(solutions)}')
 
-          g, tail, raw, payload = solutions[0]
-          print('recovered chars=', ''.join(g) + tail)
-          print('recovered xz sha256=', hashlib.sha256(raw).hexdigest())
-          out = pathlib.Path('buildsrc')
-          out.mkdir(exist_ok=True)
+          g,tail,raw,payload=solutions[0]
+          print('recovered chars=', ''.join(g)+tail)
+          print('recovered xz sha256=',hashlib.sha256(raw).hexdigest())
+          out=pathlib.Path('buildsrc'); out.mkdir(exist_ok=True)
           with tarfile.open(fileobj=io.BytesIO(payload), mode='r:') as tf:
               for m in tf.getmembers():
-                  p = pathlib.PurePosixPath(m.name)
+                  p=pathlib.PurePosixPath(m.name)
                   if p.is_absolute() or '..' in p.parts:
                       raise SystemExit(f'unsafe archive path: {m.name}')
               tf.extractall(out)
@@ -189,8 +160,7 @@ jobs:
       - name: Install build requirements
         shell: pwsh
         working-directory: buildsrc
-        run: |
-          python -m pip install --disable-pip-version-check -r requirements-build.txt
+        run: python -m pip install --disable-pip-version-check -r requirements-build.txt
 
       - name: Source self-test
         shell: pwsh
@@ -198,38 +168,35 @@ jobs:
         run: |
           python app.py --self-test --report-file .\source-self-test.json
           if ($LASTEXITCODE -ne 0) { throw 'Source self-test failed.' }
-          $r = Get-Content .\source-self-test.json -Raw -Encoding UTF8 | ConvertFrom-Json
-          if ($r.status -ne 'PASS' -or $r.version -ne '3.7.1' -or $r.schema_version -ne 360) { throw 'Source self-test is not 3.7.1/schema 360 PASS.' }
+          $r=Get-Content .\source-self-test.json -Raw -Encoding UTF8|ConvertFrom-Json
+          if ($r.status-ne'PASS' -or $r.version-ne'3.7.1' -or $r.schema_version-ne 360){throw 'Source identity mismatch.'}
 
       - name: Build native Windows executable
         shell: pwsh
         working-directory: buildsrc
-        run: |
-          powershell -ExecutionPolicy Bypass -File .\BUILD_EXE_WINDOWS.ps1 -CleanEnvironment
+        run: powershell -ExecutionPolicy Bypass -File .\BUILD_EXE_WINDOWS.ps1 -CleanEnvironment
 
       - name: Frozen EXE self-test
         shell: pwsh
         working-directory: buildsrc
         run: |
-          $exe = '.\dist\X_Plarail_Collection_OS\X_Plarail_Collection_OS.exe'
-          if (-not (Test-Path $exe)) { throw 'Frozen EXE not produced.' }
+          $exe='.\dist\X_Plarail_Collection_OS\X_Plarail_Collection_OS.exe'
+          if(-not(Test-Path $exe)){throw 'Frozen EXE not produced.'}
           & $exe --self-test --report-file .\exe-self-test.json
-          if ($LASTEXITCODE -ne 0) { throw 'Frozen EXE self-test failed.' }
-          $r = Get-Content .\exe-self-test.json -Raw -Encoding UTF8 | ConvertFrom-Json
-          if ($r.status -ne 'PASS' -or $r.version -ne '3.7.1' -or $r.schema_version -ne 360) { throw 'Frozen EXE report is not 3.7.1/schema 360 PASS.' }
+          if($LASTEXITCODE-ne 0){throw 'Frozen EXE self-test failed.'}
+          $r=Get-Content .\exe-self-test.json -Raw -Encoding UTF8|ConvertFrom-Json
+          if($r.status-ne'PASS' -or $r.version-ne'3.7.1' -or $r.schema_version-ne 360){throw 'Frozen EXE identity mismatch.'}
 
       - name: Frozen runtime identity and portable package
         shell: pwsh
         working-directory: buildsrc
         run: |
-          $dir = '.\dist\X_Plarail_Collection_OS'
-          $exe = Join-Path $dir 'X_Plarail_Collection_OS.exe'
+          $dir='.\dist\X_Plarail_Collection_OS';$exe=Join-Path $dir 'X_Plarail_Collection_OS.exe'
           & $exe --runtime-info --report-file .\runtime-info.json
-          if ($LASTEXITCODE -ne 0) { throw 'Runtime info failed.' }
-          $r = Get-Content .\runtime-info.json -Raw -Encoding UTF8 | ConvertFrom-Json
-          if (-not $r.frozen -or $r.version -ne '3.7.1' -or $r.schema_version -ne 360) { throw 'Frozen runtime identity check failed.' }
-          $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
-          $hash | Set-Content .\EXE_SHA256.txt -Encoding ascii
+          if($LASTEXITCODE-ne 0){throw 'Runtime info failed.'}
+          $r=Get-Content .\runtime-info.json -Raw -Encoding UTF8|ConvertFrom-Json
+          if(-not $r.frozen -or $r.version-ne'3.7.1' -or $r.schema_version-ne 360){throw 'Frozen runtime identity mismatch.'}
+          $hash=(Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant();$hash|Set-Content .\EXE_SHA256.txt -Encoding ascii
           Copy-Item .\exe-self-test.json (Join-Path $dir 'FROZEN_SELF_TEST_3_7_1.json')
           Copy-Item .\runtime-info.json (Join-Path $dir 'RUNTIME_INFO_3_7_1.json')
           Copy-Item .\EXE_SHA256.txt (Join-Path $dir 'SHA256_EXE_3_7_1.txt')
