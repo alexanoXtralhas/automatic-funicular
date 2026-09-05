@@ -33,10 +33,72 @@ jobs:
           Write-Host "Bundle SHA-256: $actualBundle"
           if ($actualBundle -ne $expectedBundle) { throw "Bundle SHA mismatch. Expected $expectedBundle got $actualBundle" }
 
-          New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
-          & tar.exe -xf $zip -C .\buildsrc
-          $tarExit = $LASTEXITCODE
-          Write-Host "bsdtar recovery exit code: $tarExit (known corrupt services stream is repaired below)"
+          $recover = @'
+          import pathlib, struct, zlib
+          src = pathlib.Path('X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip').read_bytes()
+          dst = pathlib.Path('buildsrc')
+          dst.mkdir(exist_ok=True)
+          pos = 0
+          extracted = 0
+          skipped = []
+          while pos + 4 <= len(src):
+              sig = src[pos:pos+4]
+              if sig in (b'PK\x01\x02', b'PK\x05\x06', b'PK\x06\x06', b'PK\x06\x07'):
+                  break
+              if sig != b'PK\x03\x04':
+                  nxt = src.find(b'PK\x03\x04', pos + 1)
+                  if nxt < 0:
+                      break
+                  pos = nxt
+                  continue
+              if pos + 30 > len(src):
+                  raise SystemExit(f'Truncated local header at {pos}')
+              (signature, version, flags, method, mtime, mdate, crc32_expected,
+               compressed_size, uncompressed_size, name_len, extra_len) = struct.unpack_from('<IHHHHHIIIHH', src, pos)
+              if flags & 0x08:
+                  raise SystemExit(f'Unsupported data-descriptor entry at {pos}')
+              header_end = pos + 30
+              name_bytes = src[header_end:header_end + name_len]
+              encoding = 'utf-8' if flags & 0x800 else 'cp437'
+              name = name_bytes.decode(encoding).replace('\\', '/')
+              data_start = header_end + name_len + extra_len
+              data_end = data_start + compressed_size
+              if data_end > len(src):
+                  raise SystemExit(f'Truncated payload for {name}')
+              compressed = src[data_start:data_end]
+              safe = pathlib.PurePosixPath(name)
+              if safe.is_absolute() or '..' in safe.parts:
+                  raise SystemExit(f'Unsafe archive path: {name}')
+              target = dst.joinpath(*safe.parts)
+              if name.endswith('/'):
+                  target.mkdir(parents=True, exist_ok=True)
+              elif name == 'xplarail/services.py':
+                  skipped.append(name)
+              else:
+                  try:
+                      if method == 0:
+                          payload = compressed
+                      elif method == 8:
+                          payload = zlib.decompress(compressed, -15)
+                      else:
+                          raise ValueError(f'unsupported compression method {method}')
+                  except Exception as exc:
+                      raise SystemExit(f'Unexpected corrupt entry {name}: {exc!r}')
+                  if len(payload) != uncompressed_size:
+                      raise SystemExit(f'Size mismatch for {name}: {len(payload)} != {uncompressed_size}')
+                  crc = zlib.crc32(payload) & 0xffffffff
+                  if crc != crc32_expected:
+                      raise SystemExit(f'CRC mismatch for {name}: {crc:08x} != {crc32_expected:08x}')
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(payload)
+                  extracted += 1
+              pos = data_end
+          if skipped != ['xplarail/services.py']:
+              raise SystemExit(f'Expected exactly one skipped services entry, got {skipped!r}')
+          print(f'Local-header recovery: PASS ({extracted} entries, skipped={skipped})')
+          '@
+          $recover | python -
+          if ($LASTEXITCODE -ne 0) { throw "Local-header recovery failed: $LASTEXITCODE" }
 
           $parts = Get-ChildItem '.\build_patches\services_parts\part_*.txt' | Sort-Object Name
           if ($parts.Count -ne 4) { throw "Expected 4 services repair parts, found $($parts.Count)." }
@@ -47,7 +109,7 @@ jobs:
           Write-Host "services.py.xz SHA-256: $actualXz"
           if ($actualXz -ne $expectedXz) { throw "services.py.xz SHA mismatch. Expected $expectedXz got $actualXz" }
 
-          $code = @'
+          $repair = @'
           import hashlib, lzma, pathlib
           compressed = pathlib.Path('services.py.xz').read_bytes()
           services = lzma.decompress(compressed)
@@ -60,7 +122,7 @@ jobs:
           target.write_bytes(services)
           print('Certified services.py repair: PASS')
           '@
-          $code | python -
+          $repair | python -
           if ($LASTEXITCODE -ne 0) { throw "services.py repair failed: $LASTEXITCODE" }
 
           foreach ($required in @(
