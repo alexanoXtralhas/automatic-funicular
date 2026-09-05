@@ -29,12 +29,14 @@ jobs:
           $parts = Get-ChildItem '.\build\minimal_tar_parts\p*.txt' | Sort-Object Name
           if ($parts.Count -ne 8) { throw "Expected 8 minimal source parts, got $($parts.Count)." }
           $b64 = ($parts | ForEach-Object { (Get-Content -Raw -Encoding UTF8 $_.FullName).Trim() }) -join ''
+          $pad = (4 - ($b64.Length % 4)) % 4
+          if ($pad -gt 0) { $b64 += ('=' * $pad) }
           [IO.File]::WriteAllBytes('.\X_Plarail_371_MENU_FIX_MINIMAL.tar.xz', [Convert]::FromBase64String($b64))
           $hash = (Get-FileHash -Algorithm SHA256 '.\X_Plarail_371_MENU_FIX_MINIMAL.tar.xz').Hash.ToLowerInvariant()
           Write-Host "MINIMAL_TAR_XZ_SHA256=$hash"
           New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
           $code = @'
-          import hashlib, pathlib, tarfile
+          import pathlib, tarfile
           src = pathlib.Path('X_Plarail_371_MENU_FIX_MINIMAL.tar.xz')
           dst = pathlib.Path('buildsrc')
           with tarfile.open(src, 'r:xz') as tf:
