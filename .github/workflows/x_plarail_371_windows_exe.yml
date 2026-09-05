@@ -3,8 +3,8 @@ name: Build X_Plarail 3.7.1 MENU_FIX Windows EXE
 on:
   push:
     paths:
-      - TRIGGER_BUILD
       - .github/workflows/x_plarail_371_windows_exe.yml
+      - build/minimal_tar_parts/**
   workflow_dispatch:
 
 permissions:
@@ -23,130 +23,48 @@ jobs:
           python-version: '3.13'
           architecture: 'x64'
 
-      - name: Recover bundle and repair certified services.py
+      - name: Reconstruct and validate clean minimal source payload
         shell: pwsh
         run: |
-          $zip = '.\X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip'
-          if (-not (Test-Path $zip)) { throw 'Build bundle not found.' }
-          $expectedBundle = '235a460cd2262c5b60975b41d833ed35430841b4750c9ad67e007590c098345e'
-          $actualBundle = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
-          Write-Host "Bundle SHA-256: $actualBundle"
-          if ($actualBundle -ne $expectedBundle) { throw "Bundle SHA mismatch. Expected $expectedBundle got $actualBundle" }
-
-          $recover = @'
-          import pathlib, struct, zlib
-          src = pathlib.Path('X_Plarail_371_MENU_FIX_BUILD_COMPLETE.zip').read_bytes()
-          dst = pathlib.Path('buildsrc')
-          dst.mkdir(exist_ok=True)
-          pos = 0
-          extracted = 0
-          skipped = []
-          while pos + 4 <= len(src):
-              sig = src[pos:pos+4]
-              if sig in (b'PK\x01\x02', b'PK\x05\x06', b'PK\x06\x06', b'PK\x06\x07'):
-                  break
-              if sig != b'PK\x03\x04':
-                  nxt = src.find(b'PK\x03\x04', pos + 1)
-                  if nxt < 0:
-                      break
-                  pos = nxt
-                  continue
-              if pos + 30 > len(src):
-                  raise SystemExit(f'Truncated local header at {pos}')
-              (signature, version, flags, method, mtime, mdate, crc32_expected,
-               compressed_size, uncompressed_size, name_len, extra_len) = struct.unpack_from('<IHHHHHIIIHH', src, pos)
-              if flags & 0x08:
-                  raise SystemExit(f'Unsupported data-descriptor entry at {pos}')
-              header_end = pos + 30
-              name_bytes = src[header_end:header_end + name_len]
-              encoding = 'utf-8' if flags & 0x800 else 'cp437'
-              name = name_bytes.decode(encoding).replace('\\', '/')
-              data_start = header_end + name_len + extra_len
-              data_end = data_start + compressed_size
-              if data_end > len(src):
-                  raise SystemExit(f'Truncated payload for {name}')
-              compressed = src[data_start:data_end]
-              safe = pathlib.PurePosixPath(name)
-              if safe.is_absolute() or '..' in safe.parts:
-                  raise SystemExit(f'Unsafe archive path: {name}')
-              target = dst.joinpath(*safe.parts)
-              if name.endswith('/'):
-                  target.mkdir(parents=True, exist_ok=True)
-              elif name == 'xplarail/services.py':
-                  skipped.append(name)
-              else:
-                  try:
-                      if method == 0:
-                          payload = compressed
-                      elif method == 8:
-                          payload = zlib.decompress(compressed, -15)
-                      else:
-                          raise ValueError(f'unsupported compression method {method}')
-                  except Exception as exc:
-                      raise SystemExit(f'Unexpected corrupt entry {name}: {exc!r}')
-                  if len(payload) != uncompressed_size:
-                      raise SystemExit(f'Size mismatch for {name}: {len(payload)} != {uncompressed_size}')
-                  crc = zlib.crc32(payload) & 0xffffffff
-                  if crc != crc32_expected:
-                      raise SystemExit(f'CRC mismatch for {name}: {crc:08x} != {crc32_expected:08x}')
-                  target.parent.mkdir(parents=True, exist_ok=True)
-                  target.write_bytes(payload)
-                  extracted += 1
-              pos = data_end
-          if skipped != ['xplarail/services.py']:
-              raise SystemExit(f'Expected exactly one skipped services entry, got {skipped!r}')
-          print(f'Local-header recovery: PASS ({extracted} entries, skipped={skipped})')
-          '@
-          $recover | python -
-          if ($LASTEXITCODE -ne 0) { throw "Local-header recovery failed: $LASTEXITCODE" }
-
-          $parts = Get-ChildItem '.\build_patches\services_parts\part_*.txt' | Sort-Object Name
-          if ($parts.Count -ne 4) { throw "Expected 4 services repair parts, found $($parts.Count)." }
+          $parts = Get-ChildItem '.\build\minimal_tar_parts\p*.txt' | Sort-Object Name
+          if ($parts.Count -ne 8) { throw "Expected 8 minimal source parts, got $($parts.Count)." }
           $b64 = ($parts | ForEach-Object { (Get-Content -Raw -Encoding UTF8 $_.FullName).Trim() }) -join ''
-          [IO.File]::WriteAllBytes('.\services.py.xz', [Convert]::FromBase64String($b64))
-          $expectedXz = 'f1047f0f4b5d5cebf3757c50a0c265944a4fd1ac84ef8c5aae8248a106324156'
-          $actualXz = (Get-FileHash -Algorithm SHA256 '.\services.py.xz').Hash.ToLowerInvariant()
-          Write-Host "services.py.xz SHA-256: $actualXz"
-          if ($actualXz -ne $expectedXz) { throw "services.py.xz SHA mismatch. Expected $expectedXz got $actualXz" }
-
-          $repair = @'
-          import hashlib, lzma, pathlib
-          compressed = pathlib.Path('services.py.xz').read_bytes()
-          services = lzma.decompress(compressed)
-          expected = '3baafdd09c829056546f36fb619a487322376a84c39ed8fc01f14268dc374545'
-          actual = hashlib.sha256(services).hexdigest()
-          if actual != expected:
-              raise SystemExit(f'services.py repair SHA mismatch: {actual}')
-          target = pathlib.Path('buildsrc/xplarail/services.py')
-          target.parent.mkdir(parents=True, exist_ok=True)
-          target.write_bytes(services)
-          print('Certified services.py repair: PASS')
+          [IO.File]::WriteAllBytes('.\X_Plarail_371_MENU_FIX_MINIMAL.tar.xz', [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash -Algorithm SHA256 '.\X_Plarail_371_MENU_FIX_MINIMAL.tar.xz').Hash.ToLowerInvariant()
+          Write-Host "MINIMAL_TAR_XZ_SHA256=$hash"
+          New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
+          $code = @'
+          import hashlib, pathlib, tarfile
+          src = pathlib.Path('X_Plarail_371_MENU_FIX_MINIMAL.tar.xz')
+          dst = pathlib.Path('buildsrc')
+          with tarfile.open(src, 'r:xz') as tf:
+              members = tf.getmembers()
+              for m in members:
+                  p = pathlib.PurePosixPath(m.name)
+                  if p.is_absolute() or '..' in p.parts:
+                      raise SystemExit(f'unsafe path: {m.name}')
+              tf.extractall(dst)
+          required = [
+              'app.py','x_plarail.spec','BUILD_EXE_WINDOWS.ps1','requirements-build.txt',
+              'xplarail/ui.py','xplarail/services.py','data/x_plarail.db',
+              'docs/CORE_BASELINE_SHA256.json','installer/windows_version_info.txt'
+          ]
+          missing = [p for p in required if not (dst / p).is_file()]
+          if missing:
+              raise SystemExit('missing required files: ' + repr(missing))
+          print(f'clean payload extraction PASS; members={len(members)}')
           '@
-          $repair | python -
-          if ($LASTEXITCODE -ne 0) { throw "services.py repair failed: $LASTEXITCODE" }
+          $code | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Minimal source payload validation failed.' }
 
-          foreach ($required in @(
-            '.\buildsrc\app.py',
-            '.\buildsrc\x_plarail.spec',
-            '.\buildsrc\BUILD_EXE_WINDOWS.ps1',
-            '.\buildsrc\requirements-build.txt',
-            '.\buildsrc\xplarail\ui.py',
-            '.\buildsrc\xplarail\services.py',
-            '.\buildsrc\data\x_plarail.db',
-            '.\buildsrc\docs\CORE_BASELINE_SHA256.json',
-            '.\buildsrc\installer\windows_version_info.txt'
-          )) {
-            if (-not (Test-Path $required)) { throw "Recovered bundle missing required file: $required" }
-          }
-
-      - name: Verify source syntax and expanded-sidebar MENU_FIX
+      - name: Verify source syntax and MENU_FIX
         shell: pwsh
         working-directory: buildsrc
         run: |
           python -m compileall -q app.py xplarail xtralhas_core xtralhas_plugins
           if ($LASTEXITCODE -ne 0) { throw 'Source compileall failed.' }
           $ui = Get-Content .\xplarail\ui.py -Raw -Encoding UTF8
-          foreach ($needle in @('nav_scrollbar', '_sidebar_mousewheel', '_refresh_sidebar_scrollbar')) {
+          foreach ($needle in @('nav_scrollbar','_sidebar_mousewheel','_refresh_sidebar_scrollbar')) {
             if (-not $ui.Contains($needle)) { throw "MENU_FIX marker missing: $needle" }
           }
           Write-Host 'Source syntax + expanded sidebar MENU_FIX: PASS'
@@ -164,9 +82,7 @@ jobs:
           python app.py --self-test --report-file .\source-self-test.json
           if ($LASTEXITCODE -ne 0) { throw 'Source self-test failed.' }
           $r = Get-Content .\source-self-test.json -Raw -Encoding UTF8 | ConvertFrom-Json
-          if ($r.status -ne 'PASS' -or $r.version -ne '3.7.1' -or $r.schema_version -ne 360) {
-            throw 'Source self-test is not 3.7.1/schema 360 PASS.'
-          }
+          if ($r.status -ne 'PASS' -or $r.version -ne '3.7.1' -or $r.schema_version -ne 360) { throw 'Source self-test is not 3.7.1/schema 360 PASS.' }
 
       - name: Build native Windows executable
         shell: pwsh
@@ -183,9 +99,7 @@ jobs:
           & $exe --self-test --report-file .\exe-self-test.json
           if ($LASTEXITCODE -ne 0) { throw 'Frozen EXE self-test failed.' }
           $r = Get-Content .\exe-self-test.json -Raw -Encoding UTF8 | ConvertFrom-Json
-          if ($r.status -ne 'PASS' -or $r.version -ne '3.7.1' -or $r.schema_version -ne 360) {
-            throw 'Frozen EXE report is not 3.7.1/schema 360 PASS.'
-          }
+          if ($r.status -ne 'PASS' -or $r.version -ne '3.7.1' -or $r.schema_version -ne 360) { throw 'Frozen EXE report is not 3.7.1/schema 360 PASS.' }
 
       - name: Frozen runtime identity and portable package
         shell: pwsh
@@ -196,16 +110,14 @@ jobs:
           & $exe --runtime-info --report-file .\runtime-info.json
           if ($LASTEXITCODE -ne 0) { throw 'Runtime info failed.' }
           $r = Get-Content .\runtime-info.json -Raw -Encoding UTF8 | ConvertFrom-Json
-          if (-not $r.frozen -or $r.version -ne '3.7.1' -or $r.schema_version -ne 360) {
-            throw 'Frozen runtime identity check failed.'
-          }
+          if (-not $r.frozen -or $r.version -ne '3.7.1' -or $r.schema_version -ne 360) { throw 'Frozen runtime identity check failed.' }
           $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
           $hash | Set-Content .\EXE_SHA256.txt -Encoding ascii
           Copy-Item .\exe-self-test.json (Join-Path $dir 'FROZEN_SELF_TEST_3_7_1.json')
           Copy-Item .\runtime-info.json (Join-Path $dir 'RUNTIME_INFO_3_7_1.json')
           Copy-Item .\EXE_SHA256.txt (Join-Path $dir 'SHA256_EXE_3_7_1.txt')
           Compress-Archive -Path "$dir\*" -DestinationPath .\X_Plarail_Collection_OS_3_7_1_MENU_FIX_WINDOWS_PORTABLE.zip -Force
-          Write-Host "EXE SHA-256: $hash"
+          Write-Host "EXE_SHA256=$hash"
 
       - name: Upload Windows portable build
         uses: actions/upload-artifact@v4
