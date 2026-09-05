@@ -4,7 +4,6 @@ on:
   push:
     paths:
       - .github/workflows/x_plarail_371_windows_exe.yml
-      - build/minimal_tar_parts/**
   workflow_dispatch:
 
 permissions:
@@ -23,41 +22,157 @@ jobs:
           python-version: '3.13'
           architecture: 'x64'
 
-      - name: Reconstruct and validate clean minimal source payload
+      - name: Recover and verify MENU_FIX source payload
         shell: pwsh
         run: |
-          $parts = Get-ChildItem '.\build\minimal_tar_parts\p*.txt' | Sort-Object Name
-          if ($parts.Count -ne 8) { throw "Expected 8 minimal source parts, got $($parts.Count)." }
-          $b64 = ($parts | ForEach-Object { (Get-Content -Raw -Encoding UTF8 $_.FullName).Trim() }) -join ''
-          $pad = (4 - ($b64.Length % 4)) % 4
-          if ($pad -gt 0) { $b64 += ('=' * $pad) }
-          [IO.File]::WriteAllBytes('.\X_Plarail_371_MENU_FIX_MINIMAL.tar.xz', [Convert]::FromBase64String($b64))
-          $hash = (Get-FileHash -Algorithm SHA256 '.\X_Plarail_371_MENU_FIX_MINIMAL.tar.xz').Hash.ToLowerInvariant()
-          Write-Host "MINIMAL_TAR_XZ_SHA256=$hash"
-          New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
           $code = @'
-          import pathlib, tarfile
-          src = pathlib.Path('X_Plarail_371_MENU_FIX_MINIMAL.tar.xz')
-          dst = pathlib.Path('buildsrc')
-          with tarfile.open(src, 'r:xz') as tf:
-              members = tf.getmembers()
-              for m in members:
+          import base64, hashlib, io, itertools, lzma, pathlib, tarfile
+
+          root = pathlib.Path('build/minimal_tar_v2_parts')
+          files = [root / f'q{i:02d}.txt' for i in range(8)]
+          if not all(p.is_file() for p in files):
+              raise SystemExit('missing v2 payload chunks')
+          parts = [p.read_text(encoding='utf-8').strip() for p in files]
+          expected_lengths = [20000] * 8
+          missing = [e-len(p) for e,p in zip(expected_lengths, parts)]
+          print('chunk lengths=', [len(p) for p in parts], 'missing=', missing)
+          if missing != [1,1,1,0,0,0,1,3]:
+              raise SystemExit(f'unexpected v2 chunk-loss pattern: {missing}')
+
+          alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+          def tar_prefix_ok(data: bytes) -> bool:
+              pos = 0
+              zero = b'\0' * 512
+              while pos + 512 <= len(data):
+                  h = data[pos:pos+512]
+                  if h == zero:
+                      return True
+                  try:
+                      raw = h[148:156].strip(b'\0 ') or b'0'
+                      stored = int(raw, 8)
+                      calc = sum(h[:148]) + (32 * 8) + sum(h[156:])
+                      if stored != calc:
+                          return False
+                      sf = h[124:136]
+                      if sf and (sf[0] & 0x80):
+                          size = int.from_bytes(sf, 'big', signed=True)
+                      else:
+                          size = int(sf.strip(b'\0 ') or b'0', 8)
+                      if size < 0:
+                          return False
+                  except Exception:
+                      return False
+                  end = pos + 512 + ((size + 511) // 512) * 512
+                  if end > len(data):
+                      return True
+                  pos = end
+              return True
+
+          def prefix_ok(corrected):
+              try:
+                  raw = base64.b64decode(''.join(corrected), validate=True)
+                  dec = lzma.LZMADecompressor()
+                  out = dec.decompress(raw)
+                  return tar_prefix_ok(out)
+              except Exception:
+                  return False
+
+          candidates = [()]
+          for idx in (0,1,2):
+              nxt = []
+              for prev in candidates:
+                  for ch in alphabet:
+                      guesses = prev + (ch,)
+                      corrected = [parts[j] + guesses[j] for j in range(idx+1)]
+                      if prefix_ok(corrected):
+                          nxt.append(guesses)
+              candidates = nxt
+              print(f'after q{idx:02d}: candidates={len(candidates)}')
+              if not candidates or len(candidates) > 8192:
+                  raise SystemExit(f'candidate search not selective at q{idx:02d}: {len(candidates)}')
+
+          candidates = [g for g in candidates if prefix_ok([
+              parts[0]+g[0], parts[1]+g[1], parts[2]+g[2], parts[3], parts[4], parts[5]
+          ])]
+          print('after exact q03-q05: candidates=', len(candidates))
+          if not candidates or len(candidates) > 1024:
+              raise SystemExit(f'candidate search not selective after q05: {len(candidates)}')
+
+          with_q6 = []
+          for g in candidates:
+              for ch in alphabet:
+                  corrected = [parts[0]+g[0], parts[1]+g[1], parts[2]+g[2], parts[3], parts[4], parts[5], parts[6]+ch]
+                  if prefix_ok(corrected):
+                      with_q6.append(g + (ch,))
+          print('after q06: candidates=', len(with_q6))
+          if not with_q6 or len(with_q6) > 1024:
+              raise SystemExit(f'candidate search not selective at q06: {len(with_q6)}')
+
+          last_first = parts[7][-1]
+          tails = []
+          for abc in itertools.product(alphabet, repeat=3):
+              tail = ''.join(abc)
+              try:
+                  b = base64.b64decode(last_first + tail, validate=True)
+              except Exception:
+                  continue
+              if b[-2:] == b'YZ':
+                  tails.append(tail)
+          print('q07 suffix candidates from XZ magic=', len(tails))
+
+          expected_hashes = {
+              'app.py':'1a779e34d7596df076ed11508b616eb5980ef8527ea9134d8daae36102aa6154',
+              'x_plarail.spec':'63d8659bae7a30caded420d876b70e786d51660538f87f69188cc065bad2430f',
+              'BUILD_EXE_WINDOWS.ps1':'d0b278eee27462c5f9c3188c64cc82b34b29079abfed8bc89f1f64d3dc2831b6',
+              'requirements-build.txt':'662eb8a76b197a938657adf57d4c173c851536273d8ecbdf1fb33c4522d7ee37',
+              'xplarail/ui.py':'6932cc3730ffd543f33b505ec89ff64f109841c57d4eaa84b841582753940763',
+              'xplarail/services.py':'3baafdd09c829056546f36fb619a487322376a84c39ed8fc01f14268dc374545',
+              'data/x_plarail.db':'fbb284f482b7795d3b76b267d8a5dd1e62109c96a026e80f4dc80c32361508a2',
+              'docs/CORE_BASELINE_SHA256.json':'2f6c15053ffe5b24eea68452c62c814726ad0ef6a859a7d972384591e7c029bd',
+              'installer/windows_version_info.txt':'84170f8d623960f6124fdf1452429474652727c957cad31b83f3c7893dd5d2eb',
+          }
+
+          solutions = []
+          for g in with_q6:
+              base_chunks = [parts[0]+g[0], parts[1]+g[1], parts[2]+g[2], parts[3], parts[4], parts[5], parts[6]+g[3]]
+              for tail in tails:
+                  try:
+                      raw = base64.b64decode(''.join(base_chunks) + parts[7] + tail, validate=True)
+                      payload = lzma.decompress(raw)
+                      with tarfile.open(fileobj=io.BytesIO(payload), mode='r:') as tf:
+                          members = {m.name: m for m in tf.getmembers() if m.isfile()}
+                          ok = True
+                          for name, expected in expected_hashes.items():
+                              m = members.get(name)
+                              if m is None:
+                                  ok = False; break
+                              f = tf.extractfile(m)
+                              if f is None or hashlib.sha256(f.read()).hexdigest() != expected:
+                                  ok = False; break
+                          if ok:
+                              solutions.append((g, tail, raw, payload))
+                  except Exception:
+                      pass
+          print('fully verified solutions=', len(solutions))
+          if len(solutions) != 1:
+              raise SystemExit(f'expected exactly one hash-verified source solution, got {len(solutions)}')
+
+          g, tail, raw, payload = solutions[0]
+          print('recovered chars=', ''.join(g) + tail)
+          print('recovered xz sha256=', hashlib.sha256(raw).hexdigest())
+          out = pathlib.Path('buildsrc')
+          out.mkdir(exist_ok=True)
+          with tarfile.open(fileobj=io.BytesIO(payload), mode='r:') as tf:
+              for m in tf.getmembers():
                   p = pathlib.PurePosixPath(m.name)
                   if p.is_absolute() or '..' in p.parts:
-                      raise SystemExit(f'unsafe path: {m.name}')
-              tf.extractall(dst)
-          required = [
-              'app.py','x_plarail.spec','BUILD_EXE_WINDOWS.ps1','requirements-build.txt',
-              'xplarail/ui.py','xplarail/services.py','data/x_plarail.db',
-              'docs/CORE_BASELINE_SHA256.json','installer/windows_version_info.txt'
-          ]
-          missing = [p for p in required if not (dst / p).is_file()]
-          if missing:
-              raise SystemExit('missing required files: ' + repr(missing))
-          print(f'clean payload extraction PASS; members={len(members)}')
+                      raise SystemExit(f'unsafe archive path: {m.name}')
+              tf.extractall(out)
+          print('payload extraction + critical SHA verification: PASS')
           '@
           $code | python -
-          if ($LASTEXITCODE -ne 0) { throw 'Minimal source payload validation failed.' }
+          if ($LASTEXITCODE -ne 0) { throw 'Deterministic source recovery failed.' }
 
       - name: Verify source syntax and MENU_FIX
         shell: pwsh
